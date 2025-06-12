@@ -241,8 +241,9 @@ class MP4Dataset(MonocularDataset):
             print("torchcodec is not installed. This may slow down the dataloader")
             self.cap = cv2.VideoCapture(str(self.dataset_path))
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+        # print(self.fps) # 15
         self.stride = config["dataset"]["subsample"]
 
     def __len__(self):

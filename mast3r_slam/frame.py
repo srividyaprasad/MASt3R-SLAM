@@ -29,6 +29,10 @@ class Frame:
     N: int = 0
     N_updates: int = 0
     K: Optional[torch.Tensor] = None
+    accel: Optional[torch.Tensor] = None 
+    gyro: Optional[torch.Tensor] = None
+    timestamp: Optional[float] = None 
+    dt: Optional[float] = None
 
     def get_score(self, C):
         filtering_score = config["tracking"]["filtering_score"]
@@ -108,7 +112,7 @@ class Frame:
         return self.C / self.N if self.C is not None else None
 
 
-def create_frame(i, img, T_WC, img_size=512, device="cuda:0"):
+def create_frame(i, img, T_WC, img_size=512, device="cuda:0", imu_data=None):
     img = resize_img(img, img_size)
     rgb = img["img"].to(device=device)
     img_shape = torch.tensor(img["true_shape"], device=device)
@@ -119,6 +123,15 @@ def create_frame(i, img, T_WC, img_size=512, device="cuda:0"):
         uimg = uimg[::downsample, ::downsample]
         img_shape = img_shape // downsample
     frame = Frame(i, rgb, img_shape, img_true_shape, uimg, T_WC)
+
+    if imu_data is not None:
+        frame.accel = torch.tensor(imu_data["accel"], device=device)
+        frame.gyro = torch.tensor(imu_data["gyro"], device=device)
+        frame.timestamp = imu_data.get("timestamps")
+        frame.dt = imu_data.get("dt")
+        # print(frame.accel.shape, frame.gyro.shape, frame.timestamp.shape, frame.dt.shape)
+        # torch.Size([17, 3]) torch.Size([17, 3]) torch.Size([17]) torch.Size([17])
+
     return frame
 
 

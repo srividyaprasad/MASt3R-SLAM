@@ -141,6 +141,45 @@ def run_backend(cfg, model, states, keyframes, K):
             if len(states.global_optimizer_tasks) > 0:
                 idx = states.global_optimizer_tasks.pop(0)
 
+def load_imu_data(imu_file):
+    """Load IMU data from file"""
+    imu_data = []
+    with open(imu_file, 'r') as f:
+        next(f)
+        first_timestamp = None
+        for line in f:
+            # Format: frame_id,time,imu_id,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,temp,hw_time_diag,hw_time_acc,hw_time_gyro
+            data = line.strip().split(',')
+            if len(data) >= 9:  
+                frame_id = int(data[0]) if data[0].strip() else 0
+                if data[1].strip():
+                    if first_timestamp is None:
+                        first_timestamp = float(data[1])
+                        timestamp = 0.0
+                    else:
+                        timestamp = float(data[1]) - first_timestamp
+                else:
+                    timestamp = 0.0
+                imu_id = int(data[2]) if data[2].strip() else 0
+                accel = []
+                for x in data[3:6]:
+                    accel.append(float(x) if x.strip() else 0.0)
+                gyro = []
+                for x in data[6:9]:
+                    gyro.append(float(x) if x.strip() else 0.0)
+                mag = None
+                if len(data) > 12:
+                    mag = []
+                    for x in data[9:12]:
+                        mag.append(float(x) if x.strip() else 0.0)
+                imu_data.append({
+                    'frame_id': frame_id,
+                    'timestamp': timestamp,
+                    'imu_id': imu_id,
+                    'accel': accel,
+                    'gyro': gyro,
+                })
+    return imu_data
 
 if __name__ == "__main__":
     mp.set_start_method("spawn")
@@ -151,17 +190,22 @@ if __name__ == "__main__":
     datetime_now = str(datetime.datetime.now()).replace(" ", "_")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="datasets/tum/rgbd_dataset_freiburg1_desk")
+    parser.add_argument("--dataset", default="/home/isaac-sim/mast3r/debug/2025-05-05-14-33-30-giga-ATI-Bangalore-Gorguntepalya-manual/debug/cam_front0-0-00.mp4")
     parser.add_argument("--config", default="config/base.yaml")
     parser.add_argument("--save-as", default="default")
     parser.add_argument("--no-viz", action="store_true")
-    parser.add_argument("--calib", default="")
+    parser.add_argument("--calib", default="config/intrinsics.yaml")
+    parser.add_argument("--imu", default="/home/isaac-sim/mast3r/debug/2025-05-05-14-33-30-giga-ATI-Bangalore-Gorguntepalya-manual/imu.csv", help="Path to IMU data file")
+
 
     args = parser.parse_args()
 
     load_config(args.config)
-    print(args.dataset)
-    print(config)
+
+    imu_data = None
+    if args.imu:
+        imu_data = load_imu_data(args.imu)
+        print(f"Loaded {len(imu_data)} IMU measurements")
 
     manager = mp.Manager()
     main2viz = new_queue(manager, args.no_viz)
@@ -227,8 +271,8 @@ if __name__ == "__main__":
 
     i = 0
     fps_timer = time.time()
-
     frames = []
+    skipped_imu_data = None  # Store IMU data from skipped frames
 
     while True:
         mode = states.get_mode()
@@ -249,8 +293,38 @@ if __name__ == "__main__":
         if i == len(dataset):
             states.set_mode(Mode.TERMINATED)
             break
-
+        
+        FPS = 15
         timestamp, img = dataset[i]
+        ts = i/FPS
+        # print(ts)
+
+        imu_frame_data = None
+        if i>0: # Starting IMU
+            current_timestamp = ts
+            prev_timestamp = dataset[i-1][0] if i > 0 else None
+
+            if prev_timestamp is not None:
+                # Create mask for timestamps between frames
+                mask = [(d['timestamp'] > prev_timestamp and d['timestamp'] <= current_timestamp) for d in imu_data]
+                filtered_data = [d for d, m in zip(imu_data, mask) if m]
+                if filtered_data: 
+                    imu_frame_data = {
+                        'timestamps': torch.tensor([d['timestamp'] for d in filtered_data], dtype=torch.float32),
+                        'accel': torch.tensor([d['accel'] for d in filtered_data], dtype=torch.float32),
+                        'gyro': torch.tensor([d['gyro'] for d in filtered_data], dtype=torch.float32),
+                        'dt': torch.tensor([d.get('dt', 0.01) for d in filtered_data], dtype=torch.float32)
+                    }
+                    
+                    # If we have skipped frame data, combine it with current frame data
+                    if skipped_imu_data is not None:
+                        imu_frame_data['timestamps'] = torch.cat([skipped_imu_data['timestamps'], imu_frame_data['timestamps']])
+                        imu_frame_data['accel'] = torch.cat([skipped_imu_data['accel'], imu_frame_data['accel']])
+                        imu_frame_data['gyro'] = torch.cat([skipped_imu_data['gyro'], imu_frame_data['gyro']])
+                        imu_frame_data['dt'] = torch.cat([skipped_imu_data['dt'], imu_frame_data['dt']])
+                        skipped_imu_data = None  
+            print("Number of IMU data for frame", i, ":", imu_frame_data['timestamps'].shape)
+
         if save_frames:
             frames.append(img)
 
@@ -260,8 +334,8 @@ if __name__ == "__main__":
             if i == 0
             else states.get_frame().T_WC
         )
-        frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
-
+        frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device, imu_data=imu_frame_data)
+        
         if mode == Mode.INIT:
             # Initialize via mono inference, and encoded features neeed for database
             X_init, C_init = mast3r_inference_mono(model, frame)
@@ -303,6 +377,13 @@ if __name__ == "__main__":
                     if len(states.global_optimizer_tasks) == 0:
                         break
                 time.sleep(0.01)
+            print(f"added {i} as new keyframe")
+        else:
+            skip_frame = True # if frame skipped then have to add this imu data to next batch
+            if imu_frame_data is not None:
+                skipped_imu_data = imu_frame_data  # Store IMU data for next frame
+            print(f"skipped {i} frame")
+
         # log time
         if i % 30 == 0:
             FPS = i / (time.time() - fps_timer)

@@ -87,6 +87,7 @@ class FrameTracker:
                     valid_meas_k,
                     K,
                     img_size,
+                    use_imu=True
                 )
         except Exception as e:
             print(f"Cholesky failed {frame.frame_id}")
@@ -214,7 +215,7 @@ class FrameTracker:
         return T_WCf, T_CkCf
 
     def opt_pose_calib_sim3(
-        self, Xf, Xk, T_WCf, T_WCk, Qk, valid, meas_k, valid_meas_k, K, img_size
+        self, Xf, Xk, T_WCf, T_WCk, Qk, valid, meas_k, valid_meas_k, K, img_size, use_imu=False
     ):
         last_error = 0
         sqrt_info_pixel = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
